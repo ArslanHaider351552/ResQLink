@@ -17,11 +17,13 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.text.TextUtils
+import android.util.Base64
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
@@ -55,6 +57,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
@@ -64,11 +68,162 @@ import com.google.android.gms.location.Priority
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Calendar
 import java.util.Locale
 import kotlin.math.sqrt
 import kotlin.time.Duration.Companion.seconds
 
-// Save contacts to SharedPreferences
+// ==========================================
+// SECURITY & CRYPTOGRAPHIC HASHING UTILS
+// ==========================================
+fun hashPassword(password: String, salt: ByteArray): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    digest.update(salt)
+    val hashBytes = digest.digest(password.toByteArray(Charsets.UTF_8))
+    return Base64.encodeToString(hashBytes, Base64.NO_WRAP)
+}
+
+fun generateSalt(): ByteArray {
+    val random = SecureRandom()
+    val salt = ByteArray(16)
+    random.nextBytes(salt)
+    return salt
+}
+
+// Validation Rules: Email requires format + at least one digit; Password requires complexity
+fun isValidEmail(email: String): Boolean {
+    val emailRegex = "^(?=.*[0-9])[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,6}$".toRegex()
+    return email.matches(emailRegex)
+}
+
+fun isValidPassword(password: String): Boolean {
+    val passwordRegex = "^(?=.*[0-9])(?=.*[a-z])(?=.*[A-Z])(?=.*[@#$%^&+=!_]).{8,}$".toRegex()
+    return password.matches(passwordRegex)
+}
+
+// ==========================================
+// THEME DEFINITIONS & PERSISTENCE
+// ==========================================
+enum class AppTheme(val displayName: String, val subtitle: String) {
+    DEFAULT("Original Light (Default)", "Clean white & royal blue clinical contrast"),
+    AMBER_NAVY("Amber & Deep Navy", "High-contrast gold on dark slate navy"),
+    EMERALD_COBALT("Emerald & Cobalt Blue", "ResQ green accents on deep cobalt")
+}
+
+fun saveAppTheme(context: Context, theme: AppTheme) {
+    val prefs = context.getSharedPreferences("resqlink_prefs", Context.MODE_PRIVATE)
+    prefs.edit().putString("app_theme", theme.name).apply()
+}
+
+fun loadAppTheme(context: Context): AppTheme {
+    val prefs = context.getSharedPreferences("resqlink_prefs", Context.MODE_PRIVATE)
+    val saved = prefs.getString("app_theme", AppTheme.DEFAULT.name)
+    return try {
+        AppTheme.valueOf(saved ?: AppTheme.DEFAULT.name)
+    } catch (e: Exception) {
+        AppTheme.DEFAULT
+    }
+}
+
+private val DefaultLightColors = lightColorScheme(
+    primary = Color(0xFF1565C0),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFD6E4FF),
+    onPrimaryContainer = Color(0xFF001B3E),
+    secondary = Color(0xFF2E7D32),
+    onSecondary = Color.White,
+    background = Color(0xFFFFFFFF),
+    surface = Color(0xFFFFFFFF),
+    surfaceVariant = Color(0xFFF1F5F9),
+    onBackground = Color(0xFF1E293B),
+    onSurface = Color(0xFF1E293B),
+    onSurfaceVariant = Color(0xFF334155)
+)
+
+private val AmberNavyColors = darkColorScheme(
+    primary = Color(0xFFF4D348),
+    onPrimary = Color(0xFF0B293D),
+    primaryContainer = Color(0xFF184E70),
+    onPrimaryContainer = Color(0xFFF4D348),
+    secondary = Color(0xFFF4D348),
+    onSecondary = Color(0xFF0B293D),
+    background = Color(0xFF0F3B57),
+    surface = Color(0xFF144666),
+    surfaceVariant = Color(0xFF1B557A),
+    onBackground = Color(0xFFF8FAFC),
+    onSurface = Color(0xFFF8FAFC),
+    onSurfaceVariant = Color(0xFFE2E8F0)
+)
+
+private val EmeraldCobaltColors = darkColorScheme(
+    primary = Color(0xFF08A808),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF0047BA),
+    onPrimaryContainer = Color(0xFF98FB98),
+    secondary = Color(0xFF08A808),
+    onSecondary = Color.White,
+    background = Color(0xFF00338D),
+    surface = Color(0xFF003FA8),
+    surfaceVariant = Color(0xFF0A49B5),
+    onBackground = Color.White,
+    onSurface = Color.White,
+    onSurfaceVariant = Color(0xFFE0E7FF)
+)
+
+// ==========================================
+// USER PROFILE & CONTACTS PERSISTENCE
+// ==========================================
+data class UserProfile(
+    val email: String,
+    val fullName: String,
+    val phone: String,
+    val dob: String
+)
+
+fun saveUserProfile(context: Context, profile: UserProfile, rawPassword: String) {
+    val prefs = context.getSharedPreferences("resqlink_prefs", Context.MODE_PRIVATE)
+
+    // Secure Salt & SHA-256 Hashing (No Plain-Text Storage Requirement)
+    val saltBytes = generateSalt()
+    val saltString = Base64.encodeToString(saltBytes, Base64.NO_WRAP)
+    val secureHash = hashPassword(rawPassword, saltBytes)
+
+    prefs.edit().apply {
+        putString("user_email", profile.email)
+        putString("user_password_hash", secureHash)
+        putString("user_password_salt", saltString)
+        putString("user_name", profile.fullName)
+        putString("user_phone", profile.phone)
+        putString("user_dob", profile.dob)
+        apply()
+    }
+}
+
+fun loadUserProfile(context: Context): UserProfile? {
+    val prefs = context.getSharedPreferences("resqlink_prefs", Context.MODE_PRIVATE)
+    val email = prefs.getString("user_email", null) ?: return null
+    val fullName = prefs.getString("user_name", "") ?: ""
+    val phone = prefs.getString("user_phone", "") ?: ""
+    val dob = prefs.getString("user_dob", "") ?: ""
+    return UserProfile(email, fullName, phone, dob)
+}
+
+fun verifyPassword(context: Context, inputPassword: String): Boolean {
+    val prefs = context.getSharedPreferences("resqlink_prefs", Context.MODE_PRIVATE)
+    val savedHash = prefs.getString("user_password_hash", null) ?: return false
+    val savedSaltStr = prefs.getString("user_password_salt", null) ?: return false
+
+    return try {
+        val saltBytes = Base64.decode(savedSaltStr, Base64.NO_WRAP)
+        val computedHash = hashPassword(inputPassword, saltBytes)
+        computedHash == savedHash
+    } catch (e: Exception) {
+        false
+    }
+}
+
 fun saveContactsToStorage(context: Context, contacts: List<EmergencyContact>) {
     val prefs = context.getSharedPreferences("resqlink_prefs", Context.MODE_PRIVATE)
     val jsonArray = JSONArray()
@@ -82,7 +237,6 @@ fun saveContactsToStorage(context: Context, contacts: List<EmergencyContact>) {
     prefs.edit().putString("saved_emergency_contacts", jsonArray.toString()).apply()
 }
 
-// Load contacts from SharedPreferences
 fun loadContactsFromStorage(context: Context): List<EmergencyContact> {
     val prefs = context.getSharedPreferences("resqlink_prefs", Context.MODE_PRIVATE)
     val jsonString = prefs.getString("saved_emergency_contacts", null) ?: return emptyList()
@@ -219,12 +373,27 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            val context = LocalContext.current
+            var currentTheme by remember { mutableStateOf(loadAppTheme(context)) }
+
+            val colorScheme = when (currentTheme) {
+                AppTheme.DEFAULT -> DefaultLightColors
+                AppTheme.AMBER_NAVY -> AmberNavyColors
+                AppTheme.EMERALD_COBALT -> EmeraldCobaltColors
+            }
+
+            MaterialTheme(colorScheme = colorScheme) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    ResQLinkApp()
+                    ResQLinkApp(
+                        currentTheme = currentTheme,
+                        onThemeChange = { newTheme ->
+                            currentTheme = newTheme
+                            saveAppTheme(context, newTheme)
+                        }
+                    )
                 }
             }
         }
@@ -232,17 +401,17 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun ResQLinkApp() {
-    // Start on the animated splash screen
-    var currentScreen by remember { mutableStateOf("splash") }
-    var isImpactDetected by remember { mutableStateOf(false) }
-
-    // Active Incident Tracking State
-    var activeIncident by remember { mutableStateOf<IncidentReport?>(null) }
-
+fun ResQLinkApp(
+    currentTheme: AppTheme,
+    onThemeChange: (AppTheme) -> Unit
+) {
     val context = LocalContext.current
 
-    // Emergency Contacts List State (Loaded from Local Storage with defaults fallback)
+    var currentUser by remember { mutableStateOf(loadUserProfile(context)) }
+    var currentScreen by remember { mutableStateOf("splash") }
+    var isImpactDetected by remember { mutableStateOf(false) }
+    var activeIncident by remember { mutableStateOf<IncidentReport?>(null) }
+
     val emergencyContacts = remember {
         val saved = loadContactsFromStorage(context)
         if (saved.isNotEmpty()) {
@@ -255,15 +424,11 @@ fun ResQLinkApp() {
         }
     }
 
-    // Live GPS Location State
     var userLat by remember { mutableDoubleStateOf(31.5204) }
     var userLng by remember { mutableDoubleStateOf(74.3587) }
     var isLocationFetched by remember { mutableStateOf(false) }
-
-    // Stealth Accessibility Status State
     var isStealthEnabled by remember { mutableStateOf(false) }
 
-    // Check if launched via Stealth Key hardware trigger
     val activity = context as? ComponentActivity
     val isStealthTriggered = activity?.intent?.getBooleanExtra("EXTRA_STEALTH_TRIGGERED", false) ?: false
 
@@ -285,7 +450,6 @@ fun ResQLinkApp() {
 
     val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
 
-    // Unified Permission Launcher for GPS, SMS, and Notifications
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -303,7 +467,6 @@ fun ResQLinkApp() {
         }
     }
 
-    // Auto-request permissions on startup + check Accessibility status
     LaunchedEffect(Unit) {
         val requiredPermissions = arrayOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
@@ -332,7 +495,6 @@ fun ResQLinkApp() {
         isStealthEnabled = isAccessibilityServiceEnabled(context, StealthKeyService::class.java)
     }
 
-    // Hardware Accelerometer Listener
     DisposableEffect(Unit) {
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -357,7 +519,6 @@ fun ResQLinkApp() {
         onDispose { sensorManager.unregisterListener(sensorListener) }
     }
 
-    // Impact Alert Overlay
     if (isImpactDetected) {
         ImpactCountdownDialog(
             onDismiss = { isImpactDetected = false },
@@ -380,10 +541,25 @@ fun ResQLinkApp() {
 
     when (currentScreen) {
         "splash" -> SplashScreen(
-            onConnectSecure = { currentScreen = "home" },
-            onLoginClick = { currentScreen = "home" }
+            onConnectSecure = { currentScreen = "register" },
+            onLoginClick = { currentScreen = "login" }
+        )
+        "register" -> RegisterProfileScreen(
+            onRegistrationComplete = { savedProfile ->
+                currentUser = savedProfile
+                currentScreen = "home"
+            },
+            onSwitchToLogin = { currentScreen = "login" }
+        )
+        "login" -> LoginScreen(
+            onLoginSuccess = { loggedInProfile ->
+                currentUser = loggedInProfile
+                currentScreen = "home"
+            },
+            onSwitchToRegister = { currentScreen = "register" }
         )
         "home" -> HomeScreen(
+            userProfile = currentUser,
             activeIncident = activeIncident,
             isStealthEnabled = isStealthEnabled,
             onEnableStealth = {
@@ -393,7 +569,14 @@ fun ResQLinkApp() {
             onNavigateToReport = { currentScreen = "report_wizard" },
             onNavigateToMap = { currentScreen = "map" },
             onNavigateToTracker = { currentScreen = "tracker" },
-            onNavigateToContacts = { currentScreen = "contacts" }
+            onNavigateToContacts = { currentScreen = "contacts" },
+            onNavigateToSettings = { currentScreen = "settings" },
+            onLogout = { currentScreen = "login" }
+        )
+        "settings" -> SettingsScreen(
+            currentTheme = currentTheme,
+            onThemeSelected = onThemeChange,
+            onBackToHome = { currentScreen = "home" }
         )
         "report_wizard" -> ReportWizardScreen(
             userLat = userLat,
@@ -427,7 +610,13 @@ fun ResQLinkApp() {
 }
 
 // ==========================================
-// ANIMATED SPLASH SCREEN (LOGO ENTRANCE)
+// ANIMATED SPLASH SCREEN
+// ==========================================
+// ==========================================
+// ANIMATED GLOSS-GLASS SPLASH SCREEN
+// ==========================================
+// ==========================================
+// ANIMATED TRANSPARENT LOGO SPLASH SCREEN
 // ==========================================
 @Composable
 fun SplashScreen(
@@ -439,7 +628,6 @@ fun SplashScreen(
     var showButtons by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        // Logo entrance animation (1 second)
         logoScale.animateTo(
             targetValue = 1f,
             animationSpec = tween(durationMillis = 1000, easing = FastOutSlowInEasing)
@@ -448,39 +636,46 @@ fun SplashScreen(
             targetValue = 1f,
             animationSpec = tween(durationMillis = 800)
         )
-
-        // Wait 3 seconds total before revealing action buttons
-        delay(2000)
+        delay(1800)
         showButtons = true
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.White), // White background matching your exact logo design
+            .background(MaterialTheme.colorScheme.background),
         contentAlignment = Alignment.Center
     ) {
+        // Ambient background glow using theme primary color
+        Box(
+            modifier = Modifier
+                .size(280.dp)
+                .alpha(0.12f)
+                .background(
+                    brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                        colors = listOf(MaterialTheme.colorScheme.primary, Color.Transparent)
+                    ),
+                    shape = CircleShape
+                )
+        )
+
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
-            modifier = Modifier.padding(bottom = 80.dp)
+            modifier = Modifier.padding(bottom = 40.dp)
         ) {
-            Box(
+            // Transparent PNG Logo with Smooth Scale & Fade Animation
+            Image(
+                painter = painterResource(id = R.drawable.resqlink_logo1),
+                contentDescription = "ResQLink Logo",
                 modifier = Modifier
+                    .size(240.dp)
                     .scale(logoScale.value)
-                    .alpha(logoAlpha.value),
-                contentAlignment = Alignment.Center
-            ) {
-                // Exact Logo Image from res/drawable/resqlink_logo.png
-                Image(
-                    painter = painterResource(id = R.drawable.resqlink_logo),
-                    contentDescription = "ResQLink Logo",
-                    modifier = Modifier.size(280.dp)
-                )
-            }
+                    .alpha(logoAlpha.value)
+            )
         }
 
-        // Action Buttons (Revealed after 3 seconds)
+        // Slide-in Action Buttons
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -498,14 +693,17 @@ fun SplashScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(54.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E7D32)),
-                        shape = RoundedCornerShape(28.dp)
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        shape = RoundedCornerShape(28.dp),
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 6.dp)
                     ) {
                         Text(
                             text = "CONNECT & SECURE",
                             fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
+                            fontWeight = FontWeight.Bold
                         )
                     }
 
@@ -514,7 +712,7 @@ fun SplashScreen(
                     TextButton(onClick = onLoginClick) {
                         Text(
                             text = "Already have an account? Log in",
-                            color = Color.DarkGray,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
                             fontSize = 14.sp
                         )
                     }
@@ -525,38 +723,551 @@ fun SplashScreen(
 }
 
 // ==========================================
+// ACCOUNT REGISTRATION & STRICT VALIDATION
+// ==========================================
+@Composable
+fun RegisterProfileScreen(
+    onRegistrationComplete: (UserProfile) -> Unit,
+    onSwitchToLogin: () -> Unit
+) {
+    val context = LocalContext.current
+    var step by remember { mutableIntStateOf(1) }
+
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+
+    var fullName by remember { mutableStateOf("") }
+    var phone by remember { mutableStateOf("") }
+    var dob by remember { mutableStateOf("") }
+
+    val openNativeDatePicker = {
+        val calendar = Calendar.getInstance()
+        val year = calendar.get(Calendar.YEAR) - 20
+        val month = calendar.get(Calendar.MONTH)
+        val day = calendar.get(Calendar.DAY_OF_MONTH)
+
+        val dialog = android.app.DatePickerDialog(
+            context,
+            { _, selectedYear, selectedMonth, selectedDay ->
+                val formattedDay = String.format(Locale.US, "%02d", selectedDay)
+                val formattedMonth = String.format(Locale.US, "%02d", selectedMonth + 1)
+                dob = "$formattedDay/$formattedMonth/$selectedYear"
+            },
+            year,
+            month,
+            day
+        )
+        dialog.datePicker.maxDate = System.currentTimeMillis()
+        dialog.show()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(24.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column {
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = if (step == 1) "Create ResQLink Account" else "Personal Safety Profile",
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                text = if (step == 1) "Step 1 of 2: Set up credentials (Email needs numbers & secure password)"
+                else "Step 2 of 2: Details shared with emergency responders",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f)
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            LinearProgressIndicator(
+                progress = { step / 2f },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp),
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            if (step == 1) {
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = { Text("Email Address (e.g. user123@gmail.com)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("Password (8+ chars, upper, lower, digit, special)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    visualTransformation = if (passwordVisible) VisualTransformation.None
+                    else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        TextButton(onClick = { passwordVisible = !passwordVisible }) {
+                            Text(if (passwordVisible) "Hide" else "Show", fontSize = 12.sp)
+                        }
+                    }
+                )
+            } else {
+                OutlinedTextField(
+                    value = fullName,
+                    onValueChange = { fullName = it },
+                    label = { Text("Full Name") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+                OutlinedTextField(
+                    value = phone,
+                    onValueChange = { phone = it },
+                    label = { Text("Phone Number (e.g., +923001234567)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = dob,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Date of Birth (DOB)") },
+                        placeholder = { Text("Tap to open calendar") },
+                        modifier = Modifier.fillMaxWidth(),
+                        trailingIcon = {
+                            TextButton(onClick = openNativeDatePicker) {
+                                Text("Calendar 📅", fontSize = 12.sp)
+                            }
+                        }
+                    )
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .clickable { openNativeDatePicker() }
+                    )
+                }
+            }
+        }
+
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                if (step == 2) {
+                    OutlinedButton(
+                        onClick = { step = 1 },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(52.dp),
+                        shape = RoundedCornerShape(28.dp)
+                    ) {
+                        Text("← Back")
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                }
+
+                Button(
+                    onClick = {
+                        if (step == 1) {
+                            when {
+                                !isValidEmail(email.trim()) -> {
+                                    Toast.makeText(
+                                        context,
+                                        "Email must be valid and contain at least one number (e.g., user123@gmail.com)",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                                !isValidPassword(password) -> {
+                                    Toast.makeText(
+                                        context,
+                                        "Password must be 8+ chars with 1 uppercase, 1 lowercase, 1 number & 1 special char",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                                else -> {
+                                    step = 2
+                                }
+                            }
+                        } else {
+                            if (fullName.isNotBlank() && phone.isNotBlank() && dob.isNotBlank()) {
+                                val newProfile = UserProfile(
+                                    email = email.trim(),
+                                    fullName = fullName.trim(),
+                                    phone = phone.trim(),
+                                    dob = dob
+                                )
+                                // Save with salt and hashing (No plain-text storage)
+                                saveUserProfile(context, newProfile, password)
+                                Toast.makeText(
+                                    context,
+                                    "Welcome, ${newProfile.fullName}! Credentials securely hashed.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                onRegistrationComplete(newProfile)
+                            } else {
+                                Toast.makeText(
+                                    context,
+                                    "Please fill in your name, phone, and DOB",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ),
+                    shape = RoundedCornerShape(28.dp)
+                ) {
+                    Text(
+                        text = if (step == 1) "NEXT ➔" else "COMPLETE SETUP",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            TextButton(onClick = onSwitchToLogin) {
+                Text(
+                    "Already have an account? Log in",
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
+                    fontSize = 14.sp
+                )
+            }
+        }
+    }
+}
+
+// ==========================================
+// LOGIN SCREEN
+// ==========================================
+@Composable
+fun LoginScreen(
+    onLoginSuccess: (UserProfile) -> Unit,
+    onSwitchToRegister: () -> Unit
+) {
+    val context = LocalContext.current
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(24.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column {
+            Spacer(modifier = Modifier.height(24.dp))
+            Text(
+                text = "Welcome Back",
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                text = "Log in with your hashed account credentials",
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f)
+            )
+
+            Spacer(modifier = Modifier.height(32.dp))
+
+            OutlinedTextField(
+                value = email,
+                onValueChange = { email = it },
+                label = { Text("Email Address") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("Password") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                visualTransformation = if (passwordVisible) VisualTransformation.None
+                else PasswordVisualTransformation(),
+                trailingIcon = {
+                    TextButton(onClick = { passwordVisible = !passwordVisible }) {
+                        Text(if (passwordVisible) "Hide" else "Show", fontSize = 12.sp)
+                    }
+                }
+            )
+        }
+
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Button(
+                onClick = {
+                    val savedProfile = loadUserProfile(context)
+                    val isPasswordCorrect = verifyPassword(context, password)
+
+                    when {
+                        email.isBlank() || password.isBlank() -> {
+                            Toast.makeText(context, "Please enter email and password", Toast.LENGTH_SHORT).show()
+                        }
+                        savedProfile != null &&
+                                savedProfile.email.equals(email.trim(), ignoreCase = true) &&
+                                isPasswordCorrect -> {
+                            Toast.makeText(context, "Welcome back, ${savedProfile.fullName}!", Toast.LENGTH_SHORT).show()
+                            onLoginSuccess(savedProfile)
+                        }
+                        savedProfile == null -> {
+                            Toast.makeText(context, "No account found on device. Please create one first.", Toast.LENGTH_SHORT).show()
+                        }
+                        else -> {
+                            Toast.makeText(context, "Invalid email or password", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                ),
+                shape = RoundedCornerShape(28.dp)
+            ) {
+                Text("LOG IN", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            TextButton(onClick = onSwitchToRegister) {
+                Text(
+                    "New to ResQLink? Create an account",
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
+                    fontSize = 14.sp
+                )
+            }
+        }
+    }
+}
+
+// ==========================================
+// SETTINGS & THEME SWITCHER SCREEN
+// ==========================================
+@Composable
+fun SettingsScreen(
+    currentTheme: AppTheme,
+    onThemeSelected: (AppTheme) -> Unit,
+    onBackToHome: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(24.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column {
+            Text(
+                text = "Settings",
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                text = "Customize your ResQLink visual theme",
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f)
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+            Text(
+                text = "App Color Theme",
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            val themeOptions = listOf(
+                Triple(AppTheme.DEFAULT, Color.White, Color(0xFF1565C0)),
+                Triple(AppTheme.AMBER_NAVY, Color(0xFFF4D348), Color(0xFF0F3B57)),
+                Triple(AppTheme.EMERALD_COBALT, Color(0xFF08A808), Color(0xFF00338D))
+            )
+
+            themeOptions.forEach { (theme, leftColor, rightColor) ->
+                val isSelected = currentTheme == theme
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp)
+                        .clickable { onThemeSelected(theme) },
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    ),
+                    border = if (isSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .padding(16.dp)
+                            .fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, Color.Gray.copy(alpha = 0.4f))
+                            ) {
+                                Row(modifier = Modifier.size(width = 52.dp, height = 36.dp)) {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                            .background(leftColor)
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                            .background(rightColor)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.width(16.dp))
+
+                            Column {
+                                Text(
+                                    text = theme.displayName,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
+                                    fontSize = 15.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = theme.subtitle,
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                                )
+                            }
+                        }
+
+                        if (isSelected) {
+                            Text(
+                                text = "✓",
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontSize = 20.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Button(
+            onClick = onBackToHome,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary
+            ),
+            shape = RoundedCornerShape(28.dp)
+        ) {
+            Text("Done", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+    }
+}
+
+// ==========================================
 // HOME DASHBOARD
 // ==========================================
 @Composable
 fun HomeScreen(
+    userProfile: UserProfile?,
     activeIncident: IncidentReport?,
     isStealthEnabled: Boolean,
     onEnableStealth: () -> Unit,
     onNavigateToReport: () -> Unit,
     onNavigateToMap: () -> Unit,
     onNavigateToTracker: () -> Unit,
-    onNavigateToContacts: () -> Unit
+    onNavigateToContacts: () -> Unit,
+    onNavigateToSettings: () -> Unit,
+    onLogout: () -> Unit
 ) {
     val context = LocalContext.current
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("ResQLink", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-            Text("Emergency Response System", fontSize = 14.sp, color = Color.Gray)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "ResQLink",
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = if (userProfile != null) "Protected: ${userProfile.fullName}" else "Emergency Response System",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onNavigateToSettings) {
+                    Text(
+                        text = "⚙️ Theme",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                TextButton(onClick = onLogout) {
+                    Text(
+                        text = "Log out",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
+                    )
+                }
+            }
         }
 
         Card(
-            modifier = Modifier.fillMaxWidth().clickable { onEnableStealth() },
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onEnableStealth() },
             colors = CardDefaults.cardColors(
                 containerColor = if (isStealthEnabled) Color(0xFFE8F5E9) else Color(0xFFFFEBEE)
             )
         ) {
             Row(
-                modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                modifier = Modifier
+                    .padding(12.dp)
+                    .fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -581,25 +1292,47 @@ fun HomeScreen(
 
         if (activeIncident != null) {
             Card(
-                modifier = Modifier.fillMaxWidth().clickable { onNavigateToTracker() },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onNavigateToTracker() },
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
             ) {
                 Row(
-                    modifier = Modifier.padding(16.dp).fillMaxWidth(),
+                    modifier = Modifier
+                        .padding(16.dp)
+                        .fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
-                        Text("🚨 Active Incident #${activeIncident.id}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                        Text("Status: ${activeIncident.status.label}", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            text = "🚨 Active Incident #${activeIncident.id}",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Text(
+                            text = "Status: ${activeIncident.status.label}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+                        )
                     }
-                    Text("View ➔", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    Text(
+                        text = "View ➔",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
                 }
             }
         }
 
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("VICTIM MODE", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.Red)
+            Text(
+                text = "VICTIM MODE",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFFFF5252)
+            )
             Spacer(modifier = Modifier.height(8.dp))
 
             Surface(
@@ -608,7 +1341,8 @@ fun HomeScreen(
                     .pointerInput(Unit) {
                         detectTapGestures(
                             onLongPress = {
-                                Toast.makeText(context, "🚨 CRITICAL SOS DISPATCHED!", Toast.LENGTH_LONG).show()
+                                val senderName = userProfile?.fullName ?: "User"
+                                Toast.makeText(context, "🚨 CRITICAL SOS DISPATCHED FOR $senderName!", Toast.LENGTH_LONG).show()
                             }
                         )
                     },
@@ -627,26 +1361,49 @@ fun HomeScreen(
         }
 
         Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("BYSTANDER WITNESS", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.Gray)
+            Text(
+                text = "BYSTANDER WITNESS",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
+            )
             Spacer(modifier = Modifier.height(8.dp))
 
-            Button(onClick = onNavigateToReport, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                Text("Report Incident (4-Step Wizard)", fontSize = 15.sp)
+            Button(
+                onClick = onNavigateToReport,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                )
+            ) {
+                Text("Report Incident (4-Step Wizard)", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            OutlinedButton(onClick = onNavigateToMap, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                Text("View Tactical Incident Map", fontSize = 15.sp)
+            OutlinedButton(
+                onClick = onNavigateToMap,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+                border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
+            ) {
+                Text("View Tactical Incident Map", fontSize = 15.sp, color = MaterialTheme.colorScheme.primary)
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
             OutlinedButton(
                 onClick = { onNavigateToContacts() },
-                modifier = Modifier.fillMaxWidth().height(52.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+                border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
             ) {
-                Text("Manage Emergency Contacts 👥", fontSize = 15.sp)
+                Text("Manage Emergency Contacts 👥", fontSize = 15.sp, color = MaterialTheme.colorScheme.primary)
             }
         }
     }
@@ -669,7 +1426,10 @@ fun ReportWizardScreen(
     var notesText by remember { mutableStateOf("") }
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(20.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(20.dp),
         verticalArrangement = Arrangement.SpaceBetween
     ) {
         Column {
@@ -681,10 +1441,20 @@ fun ReportWizardScreen(
                 Text("Step $step of 4", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                 TextButton(onClick = onBackToHome) { Text("Cancel") }
             }
-            LinearProgressIndicator(progress = { step / 4f }, modifier = Modifier.fillMaxWidth().height(6.dp))
+            LinearProgressIndicator(
+                progress = { step / 4f },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp),
+                color = MaterialTheme.colorScheme.primary
+            )
         }
 
-        Box(modifier = Modifier.weight(1f).padding(vertical = 16.dp)) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .padding(vertical = 16.dp)
+        ) {
             when (step) {
                 1 -> CategorySelectionStep(selectedCategory) { selectedCategory = it }
                 2 -> SeveritySelectionStep(selectedSeverity) { selectedSeverity = it }
@@ -695,7 +1465,12 @@ fun ReportWizardScreen(
 
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             if (step > 1) {
-                OutlinedButton(onClick = { step-- }, modifier = Modifier.weight(1f).height(50.dp)) {
+                OutlinedButton(
+                    onClick = { step-- },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp)
+                ) {
                     Text("← Back")
                 }
                 Spacer(modifier = Modifier.width(12.dp))
@@ -717,9 +1492,15 @@ fun ReportWizardScreen(
                         onSubmitReport(report)
                     }
                 },
-                modifier = Modifier.weight(1f).height(50.dp)
+                modifier = Modifier
+                    .weight(1f)
+                    .height(50.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                )
             ) {
-                Text(if (step == 4) "🚨 SUBMIT REPORT" else "Next ➔")
+                Text(if (step == 4) "🚨 SUBMIT REPORT" else "Next ➔", fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -745,7 +1526,9 @@ fun CategorySelectionStep(selectedCategory: String, onSelect: (String) -> Unit) 
             items(categories) { (title, emoji) ->
                 val isSelected = title == selectedCategory
                 Card(
-                    modifier = Modifier.height(100.dp).clickable { onSelect(title) },
+                    modifier = Modifier
+                        .height(100.dp)
+                        .clickable { onSelect(title) },
                     colors = CardDefaults.cardColors(
                         containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
                     ),
@@ -782,7 +1565,10 @@ fun SeveritySelectionStep(selectedSeverity: String, onSelect: (String) -> Unit) 
         severities.forEach { (title, desc) ->
             val isSelected = title == selectedSeverity
             Card(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).clickable { onSelect(title) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 6.dp)
+                    .clickable { onSelect(title) },
                 colors = CardDefaults.cardColors(
                     containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
                 ),
@@ -790,7 +1576,11 @@ fun SeveritySelectionStep(selectedSeverity: String, onSelect: (String) -> Unit) 
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(title, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Text(desc, fontSize = 12.sp, color = Color.Gray)
+                    Text(
+                        text = desc,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                    )
                 }
             }
         }
@@ -804,7 +1594,9 @@ fun LocationConfirmationStep(lat: Double, lng: Double, isFetched: Boolean) {
         Spacer(modifier = Modifier.height(16.dp))
 
         Card(
-            modifier = Modifier.fillMaxWidth().height(220.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(220.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
         ) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -814,7 +1606,7 @@ fun LocationConfirmationStep(lat: Double, lng: Double, isFetched: Boolean) {
                     Text(
                         text = if (isFetched) "GPS Signal Secured" else "Acquiring GPS Fix...",
                         fontWeight = FontWeight.Bold,
-                        color = if (isFetched) Color(0xFF2E7D32) else Color.Gray
+                        color = if (isFetched) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text("Latitude: ${String.format(Locale.US, "%.4f° N", lat)}", fontSize = 14.sp)
@@ -847,7 +1639,11 @@ fun ReviewSubmitStep(
                 Spacer(modifier = Modifier.height(4.dp))
                 Text("Severity: $severity", fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(4.dp))
-                Text("GPS: ${String.format(Locale.US, "%.4f", lat)}° N, ${String.format(Locale.US, "%.4f", lng)}° E", fontSize = 12.sp, color = Color.Gray)
+                Text(
+                    text = "GPS: ${String.format(Locale.US, "%.4f", lat)}° N, ${String.format(Locale.US, "%.4f", lng)}° E",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                )
             }
         }
 
@@ -857,7 +1653,9 @@ fun ReviewSubmitStep(
             value = notes,
             onValueChange = onNotesChange,
             label = { Text("Additional Scene Notes (Optional)") },
-            modifier = Modifier.fillMaxWidth().height(120.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(120.dp),
             shape = RoundedCornerShape(8.dp)
         )
     }
@@ -888,58 +1686,90 @@ fun TacticalMapScreen(
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(20.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
         Text("Tactical Live GIS Radar", fontSize = 22.sp, fontWeight = FontWeight.Bold)
 
         Card(
-            modifier = Modifier.fillMaxWidth().height(220.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B))
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(220.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A1929))
         ) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("📡", fontSize = 36.sp)
                     Text("ACTIVE DISPATCH RADAR", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Text("Center: ${String.format(Locale.US, "%.4f", userLat)}° N, ${String.format(Locale.US, "%.4f", userLng)}° E", color = Color.LightGray, fontSize = 11.sp)
+                    Text(
+                        text = "Center: ${String.format(Locale.US, "%.4f", userLat)}° N, ${String.format(Locale.US, "%.4f", userLng)}° E",
+                        color = Color.LightGray,
+                        fontSize = 11.sp
+                    )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text("Nearby Active Incidents: ${incidents.size}", color = Color(0xFF38BDF8), fontWeight = FontWeight.Bold)
                 }
             }
         }
 
+        Spacer(modifier = Modifier.height(12.dp))
         Text("Nearby Incident Stream", fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.align(Alignment.Start))
 
-        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+        ) {
             items(incidents) { inc ->
                 Card(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                 ) {
                     Row(
-                        modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                        modifier = Modifier
+                            .padding(12.dp)
+                            .fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text("${inc.category} (#${inc.id})", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                            Text("Coordinates: ${String.format(Locale.US, "%.3f", inc.latitude)}, ${String.format(Locale.US, "%.3f", inc.longitude)}", fontSize = 11.sp, color = Color.Gray)
+                            Text(
+                                text = "Coordinates: ${String.format(Locale.US, "%.3f", inc.latitude)}, ${String.format(Locale.US, "%.3f", inc.longitude)}",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                            )
                         }
 
                         OutlinedButton(
                             onClick = { openGoogleMapsDirections(context, inc.latitude, inc.longitude) },
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
                         ) {
-                            Text("Route 🧭", fontSize = 12.sp)
+                            Text("Route 🧭", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
                         }
                     }
                 }
             }
         }
 
-        Button(onClick = onBackToHome, modifier = Modifier.fillMaxWidth().height(50.dp)) {
-            Text("Back to Dashboard")
+        Button(
+            onClick = onBackToHome,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary
+            )
+        ) {
+            Text("Back to Dashboard", fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -967,13 +1797,18 @@ fun ActiveTrackerScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .padding(20.dp)
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.SpaceBetween
     ) {
         Column {
             Text("Incident Dispatch Status", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text("Report ID: #${incident.id}", fontSize = 14.sp, color = Color.Gray)
+            Text(
+                text = "Report ID: #${incident.id}",
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -982,18 +1817,25 @@ fun ActiveTrackerScreen(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Category: ${incident.category}", fontWeight = FontWeight.Bold)
-                    Text("Severity: ${incident.severity}")
-                    Text("GPS: ${String.format(Locale.US, "%.4f", incident.latitude)}, ${String.format(Locale.US, "%.4f", incident.longitude)}", fontSize = 12.sp, color = Color.Gray)
+                    Text("Category: ${incident.category}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    Text("Severity: ${incident.severity}", color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    Text(
+                        text = "GPS: ${String.format(Locale.US, "%.4f", incident.latitude)}, ${String.format(Locale.US, "%.4f", incident.longitude)}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                    )
 
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Button(
                         onClick = { openGoogleMapsDirections(context, incident.latitude, incident.longitude) },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("🗺️ Get Driving Directions")
+                        Text("🗺️ Get Driving Directions", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -1007,12 +1849,14 @@ fun ActiveTrackerScreen(
                 val isCurrent = status.stepIndex == currentStatus.stepIndex
 
                 val stepColor by animateColorAsState(
-                    targetValue = if (isCompleted) MaterialTheme.colorScheme.primary else Color.LightGray,
+                    targetValue = if (isCompleted) MaterialTheme.colorScheme.primary else Color.Gray.copy(alpha = 0.4f),
                     label = "stepColor"
                 )
 
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Surface(
@@ -1021,7 +1865,12 @@ fun ActiveTrackerScreen(
                         color = stepColor
                     ) {
                         Box(contentAlignment = Alignment.Center) {
-                            Text("${status.stepIndex + 1}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(
+                                text = "${status.stepIndex + 1}",
+                                color = if (isCompleted) MaterialTheme.colorScheme.onPrimary else Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
                         }
                     }
 
@@ -1030,7 +1879,7 @@ fun ActiveTrackerScreen(
                     Text(
                         text = status.label,
                         fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.Normal,
-                        color = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Black,
+                        color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onBackground,
                         fontSize = 15.sp
                     )
                 }
@@ -1058,20 +1907,31 @@ fun ActiveTrackerScreen(
 
                         showSystemNotification(context, "ResQLink: ${nextStatus.label}", notificationMessage)
                     },
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32), contentColor = Color.White)
                 ) {
                     Text("Simulate Rescuer Status Update ⚡")
                 }
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
-            Button(onClick = onBackToHome, modifier = Modifier.fillMaxWidth().height(50.dp)) {
-                Text("Return to Dashboard")
+            Button(
+                onClick = onBackToHome,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                )
+            ) {
+                Text("Return to Dashboard", fontWeight = FontWeight.Bold)
             }
             Spacer(modifier = Modifier.height(8.dp))
             TextButton(onClick = onClearIncident, modifier = Modifier.fillMaxWidth()) {
-                Text("Close & Clear Incident", color = Color.Red)
+                Text("Close & Clear Incident", color = Color(0xFFFF5252))
             }
         }
     }
@@ -1106,7 +1966,7 @@ fun ImpactCountdownDialog(onDismiss: () -> Unit, onAutoDispatch: () -> Unit) {
         },
         confirmButton = {
             Button(onClick = onAutoDispatch, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) {
-                Text("DISPATCH NOW")
+                Text("DISPATCH NOW", color = Color.White)
             }
         },
         dismissButton = {
@@ -1135,16 +1995,20 @@ fun ContactsScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .padding(20.dp),
         verticalArrangement = Arrangement.SpaceBetween
     ) {
         Column {
             Text("Emergency Contacts", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text("Add trusted contacts to receive automated SOS SMS alerts.", fontSize = 13.sp, color = Color.Gray)
+            Text(
+                text = "Add trusted contacts to receive automated SOS SMS alerts.",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Input Form Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -1166,7 +2030,7 @@ fun ContactsScreen(
                     OutlinedTextField(
                         value = phoneInput,
                         onValueChange = { phoneInput = it },
-                        label = { Text("Phone Number (e.g., +1234567890)") },
+                        label = { Text("Phone Number (e.g., +923001234567)") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true
                     )
@@ -1177,7 +2041,7 @@ fun ContactsScreen(
                         onClick = {
                             if (nameInput.isNotBlank() && phoneInput.isNotBlank()) {
                                 contacts.add(EmergencyContact(nameInput, phoneInput))
-                                saveContactsToStorage(context, contacts) // Auto-save update
+                                saveContactsToStorage(context, contacts)
                                 nameInput = ""
                                 phoneInput = ""
                                 Toast.makeText(context, "Contact saved successfully!", Toast.LENGTH_SHORT).show()
@@ -1185,9 +2049,13 @@ fun ContactsScreen(
                                 Toast.makeText(context, "Please fill in both fields.", Toast.LENGTH_SHORT).show()
                             }
                         },
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        )
                     ) {
-                        Text("Add to Emergency List ➕")
+                        Text("Add to Emergency List ➕", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -1196,34 +2064,54 @@ fun ContactsScreen(
             Text("Saved Recipients (${contacts.size})", fontWeight = FontWeight.Bold, fontSize = 16.sp)
             Spacer(modifier = Modifier.height(8.dp))
 
-            // List of Saved Contacts
             if (contacts.isEmpty()) {
-                Box(modifier = Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
-                    Text("No emergency contacts added yet.", color = Color.Gray, fontSize = 13.sp)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(100.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "No emergency contacts added yet.",
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
+                        fontSize = 13.sp
+                    )
                 }
             } else {
-                LazyColumn(modifier = Modifier.height(200.dp).fillMaxWidth()) {
+                LazyColumn(
+                    modifier = Modifier
+                        .height(200.dp)
+                        .fillMaxWidth()
+                ) {
                     items(contacts) { contact ->
                         Card(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                         ) {
                             Row(
-                                modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                                modifier = Modifier
+                                    .padding(12.dp)
+                                    .fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column {
                                     Text(contact.name, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                                    Text(contact.phone, fontSize = 13.sp, color = Color.Gray)
+                                    Text(
+                                        text = contact.phone,
+                                        fontSize = 13.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                                    )
                                 }
                                 TextButton(
                                     onClick = {
                                         contacts.remove(contact)
-                                        saveContactsToStorage(context, contacts) // Auto-save update
+                                        saveContactsToStorage(context, contacts)
                                     }
                                 ) {
-                                    Text("Remove", color = Color.Red, fontSize = 12.sp)
+                                    Text("Remove", color = Color(0xFFFF5252), fontSize = 12.sp)
                                 }
                             }
                         }
@@ -1234,9 +2122,15 @@ fun ContactsScreen(
 
         Button(
             onClick = onBackToHome,
-            modifier = Modifier.fillMaxWidth().height(50.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary
+            )
         ) {
-            Text("Back to Dashboard")
+            Text("Back to Dashboard", fontWeight = FontWeight.Bold)
         }
     }
 }
